@@ -67,6 +67,6 @@ curl -XPOST 127.0.0.1:8090/api/confs --data '{"domain": "test.dev.firebroo.com",
 在已有3000+域名得基础，增加3000域名，100线程消耗时间6分钟左右，多次测试没有添加失败情况，无并发问题，主要瓶颈在nginx -t这一步骤，nginx需要解析加载配置文件去测试语法，
 
 ```py
-[root@flowmirror nginx_confd]# python test/add_conf_current_test.py
+python test/add_conf_current_test.py
 100 threads add 3000 domain finish, time: 365.082176924
 ```
