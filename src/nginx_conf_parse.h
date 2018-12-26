@@ -25,8 +25,8 @@ class nginxConfParse {
             this->nginx_conf_path = filesystem::path(nginx_conf_path); 
         }
 
-        unordered_map<std::string, vector<std::string>> parse(const char* nginx_conf_path) {
-            unordered_map<std::string, vector<std::string>> ss;
+        std::unordered_map<std::string, vector<std::string>> parse(const char* nginx_conf_path) {
+            std::unordered_map<std::string, vector<std::string>> ss;
 
             this->nginx_conf_path = filesystem::path(nginx_conf_path); 
             this->content = this->load_conf_content(this->nginx_conf_path.string());
@@ -117,7 +117,7 @@ class nginxConfParse {
                         boost::split(listens, listen, boost::is_any_of(" "));
                         for (size_t i = 0; i < listens.size(); i++) {
                             string port = trim(listens[i]);
-                            if (!port.empty() && port != "proxy_protocol" && port != "ssl" && port != "http2") {
+                            if (!port.empty() && !is_nginx_listen_opt(port)) {
                                 string key = ele + ":" + port;
                                 servers[key] = proxy_pass; 
                             }
@@ -127,6 +127,17 @@ class nginxConfParse {
             }
 
             return servers; 
+        }
+
+        bool is_nginx_listen_opt(std::string port) {
+            static const std::string listen_opt[] = {"default_server", "proxy_protocol", "ssl", "http2", "reuseport"};
+            static const size_t listen_opt_count = sizeof(listen_opt)/sizeof(listen_opt[0]);
+            for (size_t  i = 0; i < listen_opt_count; i++) {
+                if (listen_opt[i] == port) {
+                    return true;
+                }
+            } 
+            return false;
         }
         
         std::string remove_protocol(std::string str) {

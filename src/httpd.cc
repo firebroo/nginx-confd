@@ -1,15 +1,21 @@
 #include "httpd.h"
-#include "pv.h"
+#include "confd_shmtx.h"
 #include "config.h"
-#include "mem_dict.h"
+#include "confd_dict.h"
+#include "confd_shm.h"
 #include <boost/foreach.hpp>
 #include "../lib/jsoncpp/src/json/json.h"
+
+
+extern confd_shm_t   *shm;
+extern confd_shmtx_t *shmtx;
 
 using namespace std;
 // Added for the json-example:
 using namespace boost::property_tree;
 
 using HttpServer = SimpleWeb::Server<SimpleWeb::HTTP>;
+
 
 
 int httpServer(std::string address, int port) {
@@ -19,6 +25,7 @@ int httpServer(std::string address, int port) {
   HttpServer server;
   server.config.port = port;
   server.config.address = address;
+  server.config.reuse_port = true;
 
   // Add resources using path-regex and method-string, and an anonymous function
   // POST-example for the path /string, responds the posted string
@@ -67,7 +74,7 @@ int httpServer(std::string address, int port) {
       } 
 
       confd_dict dict;
-      dict.shm_to_dict();
+      dict.shm_sync_to_dict();
       std::pair<bool, std::string> ret = dict.add_key(listen_port, domain, upstream_vcs, tmp_type);
       
       root["code"] = 200;
@@ -84,23 +91,51 @@ int httpServer(std::string address, int port) {
   };
 
   server.resource["^/api/confs$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
-    P(sem_id);
-    string content(data);
-    V(sem_id);
+    lock(shmtx);
+    string content(shm->addr);
+    unlock(shmtx);
 
     *response << "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " << content.length() << "\r\n\r\n"
               << content;
   };
 
+  server.resource["^/api/confs/((.*?):(.*?))"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+    Json::Value root, data, upstreams;
+
+    std::string search = request->path_match[1];
+    confd_dict* dict = new confd_dict();
+    dict->shm_sync_to_dict();
+    std::pair<bool, std::vector<std::string>> ret = dict->get_value_by_key(search);
+    if (ret.first) {
+        root["code"] = 200;
+        for(auto& item: ret.second) {
+           upstreams.append(item); 
+        }
+        data["listen"] = string(request->path_match[3]);
+        data["server_name"] = string(request->path_match[2]);
+        data["upstream"] = upstreams;
+    } else {
+        root["code"] = 403;
+    }
+    root["data"] = data;
+    delete dict;
+    
+    string content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: application/json\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
+
+
   // GET-example for the path /match/[number], responds with the matched string in path (number)
   // For instance a request GET /match/123 will receive: 123
   // GET-example simulating heavy work in a separate thread
   server.resource["^/work$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> /*request*/) {
-    thread work_thread([response] {
-      this_thread::sleep_for(chrono::seconds(5));
-      response->write("Work done");
-    });
-    work_thread.detach();
+    string content = "hello,world\n";
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
   };
 
   // Default GET-example. If no other matches, this anonymous function will be called.

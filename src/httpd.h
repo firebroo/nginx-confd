@@ -11,7 +11,5 @@
 #include <fstream>
 #include <vector>
 
-extern char* data;
-extern int sem_id;
 
 int httpServer(std::string address, int port);

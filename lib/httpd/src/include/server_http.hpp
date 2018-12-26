@@ -305,6 +305,7 @@ namespace SimpleWeb {
       std::string address;
       /// Set to false to avoid binding the socket to an address that is already in use. Defaults to true.
       bool reuse_address = true;
+      bool reuse_port = false;
     };
     /// Set before calling start().
     Config config;
@@ -353,6 +354,11 @@ namespace SimpleWeb {
         acceptor = std::unique_ptr<asio::ip::tcp::acceptor>(new asio::ip::tcp::acceptor(*io_service));
       acceptor->open(endpoint.protocol());
       acceptor->set_option(asio::socket_base::reuse_address(config.reuse_address));
+      if (config.reuse_port) {
+        int one = 1;
+        #include <arpa/inet.h>
+        setsockopt(acceptor->native_handle(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &one, sizeof(one));
+      }
       acceptor->bind(endpoint);
 
       after_bind();

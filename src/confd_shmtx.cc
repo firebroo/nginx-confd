@@ -1,3 +1,7 @@
+#include "confd_shmtx.h"
+
+#if (USE_SYSV_SEM)
+
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
@@ -7,10 +11,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/wait.h>
-#include "pv.h"
 
-int 
-init_pv()
+confd_shmtx_t* 
+init_lock()
 {
     int            i, ret;
     int            semid;
@@ -23,6 +26,11 @@ init_pv()
 
     unsigned short buf[MAX_SEMAPHORE] ;
 
+    confd_shmtx_t* shmtx = (confd_shmtx_t*)malloc(sizeof(confd_shmtx_t));
+    if (!shmtx) {
+        printf("malloc() failed.\n");
+        return NULL;
+    }
     for(i = 0; i < MAX_SEMAPHORE; ++i) {
          /* Initial semaphore */
          buf[i] = i + 1;
@@ -30,22 +38,25 @@ init_pv()
     
     semid = semget(IPC_PRIVATE, MAX_SEMAPHORE, IPC_CREAT|0666);
     if (semid == -1) {
-        fprintf(stderr, "Error in semget:%s\n", strerror(errno));
-        exit(-1) ;
+        printf("semget() failed error: %s\n", strerror(errno));
+        free(shmtx);
+        return NULL;
     }
 
     arg.array = buf;
     ret = semctl(semid , 0, SETALL, arg);
     if (ret == -1) {
-         fprintf(stderr, "Error in semctl:%s!\n", strerror(errno));
-         exit(-1) ;
+        printf("semctl() failed error: %s\n", strerror(errno));
+        free(shmtx);
+        return NULL;
     }
-    return semid;
+    shmtx->sem_id = semid; 
+
+    return shmtx;
 }
 
-//p
 int
-P(int semid)
+lock(confd_shmtx_t* shmtx)
 {
     int    i;
     struct sembuf  sb[MAX_SEMAPHORE];
@@ -56,12 +67,11 @@ P(int semid)
         sb[i].sem_flg = 0 ;
     }
 
-    return semop(semid , sb , 10);
+    return semop(shmtx->sem_id , sb , MAX_SEMAPHORE);
 }
 
-//v
 int
-V(int semid)
+unlock(confd_shmtx_t* shmtx)
 {
     int i;
     struct sembuf  sb[MAX_SEMAPHORE];
@@ -72,14 +82,22 @@ V(int semid)
         sb[i].sem_flg = 0 ;
     }
 
-    return semop(semid , sb , 10);
+    return semop(shmtx->sem_id , sb , MAX_SEMAPHORE);
 }
 
 
-void
-rm_pv(int sem_id)
+bool
+destory_lock(confd_shmtx_t* shmtx)
 {
+    int sem_id;
+
+    sem_id = shmtx->sem_id;
+    free(shmtx);
     if (semctl(sem_id, 0, IPC_RMID, 0) == -1) {
-        fprintf(stderr, "Error in semctl:%s!\n", strerror(errno));
+        printf("semctl(IPC_RMID) failed error: %s\n", strerror(errno));
+        return false;
     }
+    return true;
 }
+
+#endif

@@ -1,4 +1,5 @@
 #include "nginx_opt.h"
+#include "util.h"
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -13,25 +14,27 @@ const char* nginx_opt::upstream_struct_server = "    server %s;\n";
 const char* nginx_opt::upstream_struct_end = "}\n";
 const char* nginx_opt::nginx_test_ok = "nginx: the configuration file %s syntax is ok\n"
                                        "nginx: configuration file %s test is successful\n";
+const char* nginx_opt::nginx_http_health_check = "check interval=10000 rise=2 fall=5 timeout=2000 type=http;\n"
+                                                "check_http_send \"HEAD / HTTP/1.0\\r\\n\\r\\n\";\n"
+                                                "check_http_expect_alive http_2xx http_3xx;\n";
+const char* nginx_opt::nginx_tcp_health_check = "check interval=10000 rise=2 fall=5 timeout=2000 type=tcp;\n";
+
 
 std::pair<bool, std::string> 
 nginx_opt::nginx_conf_test(const char* nginx_bin_path, const char* nginx_conf_path)
 {
-    FILE *fp;
     char  cmd[1024] = {0};
     char  test_ok[1024] = {0};
-    char  buffer[10240] = {0};
 
     sprintf(test_ok, nginx_opt::nginx_test_ok, nginx_conf_path, nginx_conf_path);
-
     sprintf(cmd, "%s -c %s -t 2>&1", nginx_bin_path, nginx_conf_path);
-    fp = popen(cmd, "r");
-    fseek(fp, 0, SEEK_END);
-    long length = ftell(fp);
-    rewind(fp); 
-    fread(buffer, sizeof(char), length, fp);
-    fclose(fp);
-    if (!strcmp(test_ok, buffer)) {
+
+    std::pair<bool, std::string> ret = exec_cmd(cmd);
+    if (!ret.first) {
+        return ret;
+    }
+    std::string& buffer = ret.second;
+    if (!strcmp(test_ok, buffer.c_str())) {
         return std::pair<bool, std::string>(true, "");
     }
     return std::pair<bool, std::string>(false, buffer);
@@ -40,21 +43,39 @@ nginx_opt::nginx_conf_test(const char* nginx_bin_path, const char* nginx_conf_pa
 std::pair<bool, std::string> 
 nginx_opt::nginx_conf_reload(const char* nginx_bin_path, const char* nginx_conf_path)
 {
-    FILE *fp;
     char  cmd[1024] = {0};
-    char  buffer[1024] = {0};
 
     sprintf(cmd, "%s -c %s -s reload 2>&1", nginx_bin_path, nginx_conf_path);
-    fp = popen(cmd, "r");
-    fseek(fp, 0, SEEK_END);
-    long length = ftell(fp);
-    rewind(fp); 
-    fread(buffer, sizeof(char), length, fp);
-    fclose(fp);
-    if (!strcmp("", buffer)) {
+    std::pair<bool, std::string> ret = exec_cmd(cmd);
+    if (!ret.first) {
+        return ret;
+    }
+    std::string& buffer = ret.second;
+    if (buffer.empty()) {
         return std::pair<bool, std::string>(true, "");
     }
     return std::pair<bool, std::string>(false, buffer);
+}
+
+std::pair<bool, std::string> 
+nginx_opt::nginx_conf_graceful_reload(const char* nginx_bin_path, const char* nginx_conf_path)
+{
+    size_t used_memsum = 0;
+
+    std::pair<bool, std::string> memsum = nginx_opt::nginx_worker_used_memsum();
+    if (!memsum.first) {
+        return memsum;
+    } else {
+        used_memsum += parse_bytes_number(memsum.second);
+    }
+    long MemAvailable = get_MemAvailable();
+    if (MemAvailable == -1L) {
+        return std::pair<bool, std::string>(false, "get key='MemAvailable' from /proc/meminfo failed.");
+    }
+    if (MemAvailable >= 0 && (size_t)MemAvailable < used_memsum) {
+        return std::pair<bool, std::string>(false, "not enough memory.");
+    }
+    return nginx_opt::nginx_conf_reload(nginx_bin_path, nginx_conf_path);
 }
 
 std::string
@@ -116,23 +137,55 @@ nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::stri
     std::ofstream ofs;
     char filepath[10240];
     sprintf(filepath, "%s%s:%s.conf", nginx_conf_writen_path.c_str(), key.c_str(), port.c_str());
-    //std::cout << filepath << std::endl;
     ofs.open(filepath);
     if (!ofs) {
         return std::pair<bool, std::string>(false, "");
     }
     ofs << upstream << server;
     ofs.close();
-    //std::cout << upstream << server << std::endl;
     auto ret = nginx_opt::nginx_conf_test(nginx_bin_path.c_str(), nginx_conf_path.c_str());
     if(!ret.first) {
         unlink(filepath);
         return ret;
     }
-    ret = nginx_opt::nginx_conf_reload(nginx_bin_path.c_str(), nginx_conf_path.c_str());
+    ret = nginx_opt::nginx_conf_graceful_reload(nginx_bin_path.c_str(), nginx_conf_path.c_str());
     if(!ret.first) {
         unlink(filepath);
         return ret;
     }
     return std::pair<bool, std::string>(true, "add successful.");
+}
+
+std::pair<bool, std::string>
+nginx_opt::nginx_worker_used_memsum()
+{
+    const char* cmd = "ps aux | grep 'nginx: worker process' | grep -v 'shutdown' | "
+                      "grep -v 'grep'| awk 'BEGIN{total=0}{total+=$6}END{printf 'total'}'";
+    std::pair<bool, std::string> ret = exec_cmd(cmd);
+    if (!ret.first) {
+        return ret;
+    }
+
+    ret.second += "kb"; //patch unit kb
+    return ret;
+}
+
+std::pair<bool, std::string>
+nginx_opt::nginx_shutting_worker_count(void)
+{
+    const char* cmd = "ps aux | grep nginx | grep shutting | grep -v 'grep' | wc -l";
+    return exec_cmd(cmd);
+}
+
+std::pair<bool, std::string>
+nginx_opt::nginx_process_used_memsum(void)
+{
+    const char* cmd = "ps aux | grep 'nginx' | grep -v 'grep'| awk 'BEGIN{total=0}{total+=$6}END{printf 'total'}'";
+    std::pair<bool, std::string> ret = exec_cmd(cmd);
+    if (!ret.first) {
+        return ret;
+    }
+
+    ret.second += "kb"; //patch unit kb
+    return ret;
 }

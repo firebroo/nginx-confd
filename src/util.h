@@ -6,8 +6,11 @@
 std::string ltrim(std::string &s);
 std::string rtrim(std::string &s);
 std::string trim(std::string &s);
-char* processname_rename(char *p, const char*wanted_name);
+char* process_rename(char *p, const char*wanted_name);
 size_t parse_bytes_number(const std::string& str);
 std::string& replace_all(std::string& str, const std::string& old_value, const std::string& new_value);
+long get_meminfo_kv(const char* k);
+long get_MemAvailable();
+std::pair<bool, std::string> exec_cmd(const char* cmd);
 
 #endif
