@@ -1,6 +1,3 @@
-### 工作原理
-master进程解析本地配置文件，同时负责处理各种信号中断，worker进程提供HTTP服务，通过共享内存+信号量实现master和worker之间数据同步
-
 ### 特性
 * pre-fork网络服务模型，根据cpu数量调控worker进程数量，支持开启端口复用(SO_REUSEPORT);
 * 修改配置无需restart进程，支持reload操作实现动态更新，保证HTTP服务稳定性; 
