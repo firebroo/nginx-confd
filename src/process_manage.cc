@@ -18,6 +18,8 @@ static bool writen_pidfile(const char* pid_path);
 
 confd_shmtx_t* shmtx;
 confd_shm_t* shm;
+confd_shmtx_t* updatetx;
+confd_shm_t* update;
 extern std::vector<pid_t> children_process_group;
 extern std::unordered_map<std::string, std::string> confd_config;
 
@@ -73,6 +75,14 @@ graceful_shutdown_confd(int signum)
 
     if (destory_shm(shm)) {
         BOOST_LOG_TRIVIAL(info) << "shm destory successful.";
+    }
+
+    if (destory_lock(updatetx)) {     //delete lock
+        BOOST_LOG_TRIVIAL(info) << "updatetx lock destory successful.";
+    }
+
+    if (destory_shm(update)) {
+        BOOST_LOG_TRIVIAL(info) << "update shm destory successful.";
     }
 
     BOOST_LOG_TRIVIAL(debug) << "shutdown all process finish.";
@@ -138,17 +148,27 @@ notify_master_process(const char *pid_path, const char *cmd)
 std::pair<bool, std::string>
 load_nginx_conf(const std::string& nginx_bin_path, const std::string& nginx_conf_path)
 {
+    std::string status;
     nginxConfParse nginx_conf_parse;
+
     std::pair<bool, std::string> ret = nginx_opt::nginx_conf_test(nginx_bin_path.c_str(), nginx_conf_path.c_str());
     if (!ret.first) {
         return ret;
     }
     std::unordered_map<std::string, vector<std::string>> dict = nginx_conf_parse.parse(nginx_conf_path.c_str()); 
     confd_dict* confd_p = new confd_dict(dict);
-    confd_p->dict_sync_to_shm();        
+    std::string new_data = confd_p->json_stringify();
+    lock(shmtx);
+    if (strcmp(shm->addr, new_data.c_str())) {
+        strcpy(shm->addr, new_data.c_str());
+        status = "update";
+    } else {
+        status = "no update";
+    }
+    unlock(shmtx);
     delete confd_p;
 
-    return std::pair<bool, std::string>(true, "");
+    return std::pair<bool, std::string>(true, status);
 }
 
 void
@@ -158,7 +178,11 @@ reload_nginx_conf(int signum)
     if (!ret.first) {
         BOOST_LOG_TRIVIAL(warning) << "reload nginx failed error: " << ret.second;
     } else {
-        BOOST_LOG_TRIVIAL(info) << "reload nginx successful.";
+        if (ret.second == "update") {
+            confd_dict dict;
+            dict.update_status(true);
+        }
+        BOOST_LOG_TRIVIAL(info) << "reparse && reload nginx_conf successful, status: " << ret.second;
     }
 }
 
@@ -170,6 +194,17 @@ init_master_process(char* process_name_ptr, unordered_map<string,string> config)
 
     if (!writen_pidfile(config["pid_path"].c_str())) {
         BOOST_LOG_TRIVIAL(warning) << "writed pidfile(" << config["pid_path"] << ") failed.";
+        return false;
+    }
+
+    update = init_shm(sizeof(bool) * 4096);
+    if (!update) {
+        BOOST_LOG_TRIVIAL(warning) << "init update shm failed.";
+    }
+
+    updatetx = init_lock();
+    if (!updatetx) {
+        BOOST_LOG_TRIVIAL(error) << "int updatetx lock failed.";
         return false;
     }
 

@@ -16,6 +16,7 @@ def add_randomkey_conf():
         post["upstreams"] = [{"server": "2.2.2.2:3333"}, {"server": "3.3.3.3:3333"}]
         post["type"] = "websocket"
         post["listen"] = "80" 
+        post["health_check"] = 0
         ret = requests.post(confd_api, data = json.dumps(post))
         data = ret.text
         json_data = json.loads(data)

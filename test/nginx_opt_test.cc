@@ -10,11 +10,11 @@ main(void)
     std::vector<std::string> value;
     value.push_back("1.1.1.1:80");
     value.push_back("1.1.1.2:80");
-    const char* nginx_bin_path = "/usr/sbin/nginx";
-    const char* nginx_conf_path = "/etc/nginx/nginx.conf";
+    const char* nginx_bin_path = "/home/work/nginx/sbin/nginx";
+    const char* nginx_conf_path = "/home/work/nginx/conf/nginx.conf";
     std::pair<bool, std::string> ret;
 
-    ret = nginx_opt::sync_to_disk("80", key, value, "standard", "/etc/nginx/vhost/", "/usr/sbin/nginx", "/etc/nginx/nginx.conf");
+    ret = nginx_opt::sync_to_disk("80", key, value, "standard", "/home/work/nginx/conf/vhost/", nginx_bin_path, nginx_conf_path, (HEALTH_CHECK)0);
     if (ret.first) {
         std::cout << "nginx test ok, sync to disk successful" << std::endl;
     } else {

@@ -1,5 +1,6 @@
 #include "nginx_opt.h"
 #include "util.h"
+#include "log.h"
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -8,16 +9,23 @@
 #include <vector>
 #include <boost/filesystem.hpp>
  
- 
+namespace logging = boost::log;
+using namespace logging;
+
 const char* nginx_opt::upstream_struct_start = "upstream %s {\n";
 const char* nginx_opt::upstream_struct_server = "    server %s;\n";
 const char* nginx_opt::upstream_struct_end = "}\n";
 const char* nginx_opt::nginx_test_ok = "nginx: the configuration file %s syntax is ok\n"
                                        "nginx: configuration file %s test is successful\n";
-const char* nginx_opt::nginx_http_health_check = "check interval=10000 rise=2 fall=5 timeout=2000 type=http;\n"
-                                                "check_http_send \"HEAD / HTTP/1.0\\r\\n\\r\\n\";\n"
-                                                "check_http_expect_alive http_2xx http_3xx;\n";
-const char* nginx_opt::nginx_tcp_health_check = "check interval=10000 rise=2 fall=5 timeout=2000 type=tcp;\n";
+const char* nginx_opt::nginx_http_health_check = "    check interval=10000 rise=2 fall=5 timeout=2000 type=http;\n"
+                                                 "    check_http_send \"HEAD / HTTP/1.0\\r\\n\\r\\n\";\n"
+                                                 "    check_http_expect_alive http_2xx http_3xx;\n";
+const char* nginx_opt::nginx_tcp_health_check = "    check interval=10000 rise=2 fall=5 timeout=2000 type=tcp;\n";
+health_check_map_t health_check_map[] = {
+    {TCP,  nginx_opt::nginx_tcp_health_check},
+    {HTTP, nginx_opt::nginx_http_health_check},
+    {NONE, ""}
+};
 
 
 std::pair<bool, std::string> 
@@ -79,7 +87,7 @@ nginx_opt::nginx_conf_graceful_reload(const char* nginx_bin_path, const char* ng
 }
 
 std::string
-nginx_opt::gen_upstream(std::string listen_port, std::string key, std::vector<std::string> value)
+nginx_opt::gen_upstream(std::string listen_port, std::string key, std::vector<std::string> value, HEALTH_CHECK type)
 {
     char upstream[10240];
     char line_server[1024];
@@ -90,8 +98,16 @@ nginx_opt::gen_upstream(std::string listen_port, std::string key, std::vector<st
         sprintf(line_server, nginx_opt::upstream_struct_server, v.c_str());
         servers += std::string(line_server);
     }
+    health_check_map_t *health_check_item;
+    std::string health_check_content("");
+    for (health_check_item = health_check_map; health_check_item->type != NONE; health_check_item++) {
+        if (type == health_check_item->type) {
+            health_check_content = health_check_item->content;
+            break;
+        } 
+    } 
     upstream_format += std::string(nginx_opt::upstream_struct_start) + \
-            std::string(servers) + std::string(nginx_opt::upstream_struct_end);
+            health_check_content + std::string(servers) + std::string(nginx_opt::upstream_struct_end);
     sprintf(upstream, upstream_format.c_str(), upstream_name.c_str());
     return std::string(upstream);
 }
@@ -123,10 +139,23 @@ nginx_opt::gen_server(std::string listen_port, std::string key, std::vector<std:
 }
 
 std::pair<bool, std::string>
-nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::string> value, 
-    std::string tmp_style, std::string nginx_conf_writen_path, std::string nginx_bin_path, std::string nginx_conf_path)
+nginx_opt::delete_conf(std::string& key, std::string& nginx_conf_writen_path)
 {
-    std::string upstream = nginx_opt::gen_upstream(port, key, value);
+    const char *conf_extension = ".conf";
+    std::string filepath = nginx_conf_writen_path + key + conf_extension;
+    if (!boost::filesystem::exists(filepath)) {
+        return std::pair<bool, std::string>(false, "unlink filepath("+filepath+") failed, filepath is not exist.");
+    }
+    unlink(filepath.c_str());
+    return std::pair<bool, std::string>(true, "unlink filepath("+filepath+") successful.");
+}
+
+std::pair<bool, std::string>
+nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::string> value, 
+    std::string tmp_style, std::string nginx_conf_writen_path, std::string nginx_bin_path, 
+    std::string nginx_conf_path, HEALTH_CHECK type)
+{
+    std::string upstream = nginx_opt::gen_upstream(port, key, value, type);
     if (upstream.empty()) {
         return std::pair<bool, std::string>(false, "");
     }
@@ -136,7 +165,7 @@ nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::stri
     }
     std::ofstream ofs;
     char filepath[10240];
-    sprintf(filepath, "%s%s:%s.conf", nginx_conf_writen_path.c_str(), key.c_str(), port.c_str());
+    sprintf(filepath, "%s%s_%s.conf", nginx_conf_writen_path.c_str(), key.c_str(), port.c_str());
     ofs.open(filepath);
     if (!ofs) {
         return std::pair<bool, std::string>(false, "");
@@ -145,6 +174,7 @@ nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::stri
     ofs.close();
     auto ret = nginx_opt::nginx_conf_test(nginx_bin_path.c_str(), nginx_conf_path.c_str());
     if(!ret.first) {
+        BOOST_LOG_TRIVIAL(info) << ret.second << upstream << server;
         unlink(filepath);
         return ret;
     }
@@ -180,12 +210,68 @@ nginx_opt::nginx_shutting_worker_count(void)
 std::pair<bool, std::string>
 nginx_opt::nginx_process_used_memsum(void)
 {
-    const char* cmd = "ps aux | grep 'nginx' | grep -v 'grep'| awk 'BEGIN{total=0}{total+=$6}END{printf 'total'}'";
+    const char* cmd = "ps aux | grep 'nginx:' | grep -v 'grep'| awk 'BEGIN{total=0}{total+=$6}END{printf 'total'}'";
     std::pair<bool, std::string> ret = exec_cmd(cmd);
     if (!ret.first) {
         return ret;
     }
-
-    ret.second += "kb"; //patch unit kb
+    ret.second = std::to_string(std::stoll(ret.second) / 1024);
+    ret.second += "Mb"; //patch unit kb
     return ret;
+}
+
+HEALTH_CHECK int_to_health_check_type(int value)
+{
+    HEALTH_CHECK type;
+
+    switch (value) {
+
+    case 0:
+        type = NONE;
+        break;
+    case 1:
+        type = TCP;
+        break;
+    case 2:
+        type = HTTP;
+        break;
+    default:
+        type = NONE;
+        break;
+    }
+    
+    return type;
+}
+
+bool
+nginx_opt::backup_single_conf(std::string& file_path)
+{
+    int ret;
+
+    if (!boost::filesystem::exists(file_path) || !boost::filesystem::is_regular_file(file_path)) {
+        return true;
+    }
+
+    ret = rename(file_path.c_str(), (file_path+".bak").c_str());
+    if (ret == -1) {
+        return false;
+    }
+
+    return true;
+}
+
+bool
+nginx_opt::rollback_single_conf(std::string& file_path)
+{
+    int ret;
+
+    std::string back_conf(file_path+".bak");
+    if (!boost::filesystem::exists(back_conf) || !boost::filesystem::is_regular_file(back_conf)) {
+        return true;
+    }
+    ret = rename(back_conf.c_str(), file_path.c_str());
+    if (ret == -1) {
+        return false;
+    }
+    return true;
 }

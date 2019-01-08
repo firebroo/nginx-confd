@@ -5,6 +5,7 @@
 
 #include <string>
 #include <fstream>
+#include <iostream>
 #include <vector>
 #include <unordered_map>
 #include <boost/regex.hpp>
@@ -105,6 +106,7 @@ class nginxConfParse {
                 if (boost::regex_search(server, proxy_pass_what, proxy_pass_e)) {
                     proxy_pass = string(proxy_pass_what[1]);
                     proxy_pass = this->remove_protocol(trim(proxy_pass));
+                    proxy_pass = this->variable_replace(proxy_pass, server); //proxy_pass maybe variable
                 }
 
                 //multi value server_name
@@ -118,7 +120,7 @@ class nginxConfParse {
                         for (size_t i = 0; i < listens.size(); i++) {
                             string port = trim(listens[i]);
                             if (!port.empty() && !is_nginx_listen_opt(port)) {
-                                string key = ele + ":" + port;
+                                string key = ele + "_" + port;
                                 servers[key] = proxy_pass; 
                             }
                         }
@@ -127,6 +129,25 @@ class nginxConfParse {
             }
 
             return servers; 
+        }
+
+        std::string variable_replace(std::string& v, std::string& ctx) {
+            if (v.substr(0, 1) != "$") {                //v is not a variable
+                return v;
+            }
+
+            boost::sregex_iterator end;
+            regex set_e("^\\s*?set\\s+(\\$.*?)\\s+(.*?);", boost::regex::perl|boost::regex::no_mod_s);
+            boost::sregex_iterator iter(ctx.begin(), ctx.end(), set_e);
+            for (; iter != end; iter++) {
+                std::string variable_name((*iter)[1]);
+                std::string variable_value((*iter)[2]);
+                if (variable_name == v) {
+                    return variable_value;
+                }
+            } 
+
+            return v;
         }
 
         bool is_nginx_listen_opt(std::string port) {

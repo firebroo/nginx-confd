@@ -66,6 +66,8 @@ int httpServer(std::string address, int port) {
       string domain = pt.get<string>("domain");
       string tmp_type = pt.get<string>("type");
       string listen_port = pt.get<string>("listen");
+      HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
+      //bool force = pt.get<bool>("force", false);
       ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
       
       std::vector<std::string> upstream_vcs;
@@ -75,10 +77,53 @@ int httpServer(std::string address, int port) {
 
       confd_dict dict;
       dict.shm_sync_to_dict();
-      std::pair<bool, std::string> ret = dict.add_key(listen_port, domain, upstream_vcs, tmp_type);
+      std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, false, type);
       
       root["code"] = 200;
       root["info"] = ret.second;
+      auto header = request->header.find("Host");
+      std::string url(header->second);
+      url += "/api/confs/" + domain + "_" + listen_port;
+      root["query_url"] = url;
+    }
+    catch(const exception &e) {
+      root["code"] = 403;
+      root["info"] = e.what();
+    }
+    content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
+
+  server.resource["^/api/confs$"]["PUT"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+    string content;
+    Json::Value root;
+    try {
+      ptree pt;
+      read_json(request->content, pt);
+
+      string domain = pt.get<string>("domain");
+      string tmp_type = pt.get<string>("type");
+      string listen_port = pt.get<string>("listen");
+      HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
+      ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
+      
+      std::vector<std::string> upstream_vcs;
+      BOOST_FOREACH(boost::property_tree::ptree::value_type &v, upstreams) {  
+          upstream_vcs.push_back(v.second.get<string>("server"));
+      } 
+
+      confd_dict dict;
+      dict.shm_sync_to_dict();
+      std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, true, type);
+      
+      root["code"] = 200;
+      root["info"] = ret.second;
+      auto header = request->header.find("Host");
+      std::string url(header->second);
+      url += "/api/confs/" + domain + "_" + listen_port;
+      root["query_url"] = url;
     }
     catch(const exception &e) {
       root["code"] = 403;
@@ -99,7 +144,7 @@ int httpServer(std::string address, int port) {
               << content;
   };
 
-  server.resource["^/api/confs/((.*?):(.*?))"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+  server.resource["^/api/confs/((.*?)_(.*?))"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
     Json::Value root, data, upstreams;
 
     std::string search = request->path_match[1];
@@ -127,6 +172,27 @@ int httpServer(std::string address, int port) {
               << content;
   };
 
+  server.resource["^/api/confs/((.*?)_(.*?))"]["DELETE"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+    Json::Value root, data, upstreams;
+
+    std::string search = request->path_match[1];
+    confd_dict* dict = new confd_dict();
+    dict->shm_sync_to_dict();
+    std::pair<bool, std::string> ret = dict->delete_key(search);
+    if (ret.first) {
+        root["code"] = 200;
+    } else {
+        root["code"] = 403;
+    }
+    root["info"] = ret.second;
+    delete dict;
+    
+    string content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: application/json\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
 
   // GET-example for the path /match/[number], responds with the matched string in path (number)
   // For instance a request GET /match/123 will receive: 123
@@ -134,6 +200,83 @@ int httpServer(std::string address, int port) {
   server.resource["^/work$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> /*request*/) {
     string content = "hello,world\n";
     *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: text/html\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
+
+  server.resource["^/api/status/solt/([0-9]+)$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+    confd_dict dict;
+    Json::Value root;
+
+    std::string search = request->path_match[1];
+    bool status = dict.status(std::stoll(search));
+    root["code"] = 200;
+    root["status"] = status;
+    string content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: application/json\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
+
+  server.resource["^/api/status_update/solt/([0-9]+)$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+    confd_dict dict;
+    Json::Value root;
+
+    std::string search = request->path_match[1];
+    bool ret = dict.update_status(false, std::stoll(search));
+    if (ret) {
+        root["code"] = 200;
+        root["info"] = "ok.";
+    } else {
+        root["code"] = 403;
+        root["info"] = "failed.";
+    }
+    string content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: application/json\r\n"
+              << "Content-Length: " << content.length() << "\r\n\r\n"
+              << content;
+  };
+
+
+  server.resource["^/api/nginx_health$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> /*request*/) {
+    Json::Value root, data;
+    std::pair<bool, std::string> ret;
+
+    ret = nginx_opt::nginx_shutting_worker_count();
+    root["error"] = "";
+    if (!ret.first) {
+        root["code"] = "403";
+        root["error"] = ret.second;
+        string content = root.toStyledString();
+        *response << "HTTP/1.1 200 OK\r\n"
+                  << "Content-Type: text/html\r\n"
+                  << "Content-Length: " << content.length() << "\r\n\r\n"
+                  << content;
+        return;
+    } else {
+        data["nginx shutting worker"] = std::to_string(std::stoll(ret.second));
+    }
+    ret = nginx_opt::nginx_process_used_memsum();
+    if (!ret.first) {
+        root["code"] = "403";
+        root["error"] = ret.second;
+        string content = root.toStyledString();
+        *response << "HTTP/1.1 200 OK\r\n"
+                  << "Content-Type: text/html\r\n"
+                  << "Content-Length: " << content.length() << "\r\n\r\n"
+                  << content;
+        return;
+    } else {
+        data["nginx process memsum"] = ret.second;
+    }
+    root["code"] = "200";
+    root["data"] = data;
+    string content = root.toStyledString();
+    *response << "HTTP/1.1 200 OK\r\n"
+              << "Content-Type: application/json\r\n"
               << "Content-Length: " << content.length() << "\r\n\r\n"
               << content;
   };
