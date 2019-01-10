@@ -144,7 +144,7 @@ int httpServer(std::string address, int port) {
               << content;
   };
 
-  server.resource["^/api/confs/((.*?)_(.*?))"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+  server.resource["^/api/confs/((.*)_(.*?))"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
     Json::Value root, data, upstreams;
 
     std::string search = request->path_match[1];

@@ -116,6 +116,7 @@ get_master_process_pid(const char* pid_path)
         return -1;
     }
     ifs >> pid;
+    ifs.close();
     return pid;
 }
 
