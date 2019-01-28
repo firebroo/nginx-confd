@@ -6,10 +6,10 @@
 #include "confd_dict.h"
 #include "nginx_conf_parse.h"
 
-namespace logging = boost::log;
-using namespace logging;
-
 static void reload_nginx_conf(int signum);
+static void waitpid_handler(int signum);
+static void graceful_shutdown_confd(int signum);
+
 static std::pair<bool, std::string> load_nginx_conf(const std::string& nginx_bin_path, 
         const std::string& nginx_conf_path);
 static bool register_signals(confd_signal_t *signals);
@@ -20,13 +20,15 @@ confd_shmtx_t* shmtx;
 confd_shm_t* shm;
 confd_shmtx_t* updatetx;
 confd_shm_t* update;
-extern std::vector<pid_t> children_process_group;
+extern std::vector<process_t> children_process_group;
 extern std::unordered_map<std::string, std::string> confd_config;
+extern char *process_name_ptr;
 
 static confd_signal_t signals[] = {
-    {SIGHUP,  "reload", reload_nginx_conf},
-    {SIGTERM, "stop",   graceful_shutdown_confd},
-    {0,       NULL,     NULL}                       //loop end flag
+    {SIGHUP,  "reload",  reload_nginx_conf},
+    {SIGTERM, "stop",    graceful_shutdown_confd},
+    {SIGCHLD, "sigchld", waitpid_handler},
+    {0,       NULL,      NULL}                       //loop end flag
 };
 
 bool
@@ -50,13 +52,140 @@ register_signals(confd_signal_t *signals)
     return true;
 }
 
+bool
+reset_signals(confd_signal_t *signals)
+{
+    confd_signal_t  *sig;
+    struct sigaction sa;
+    sa.sa_flags = 0;
+
+    for(sig = signals; sig->signo != 0; sig++) {
+        sa.sa_handler = SIG_DFL;
+        if (sigaction(sig->signo, &sa, NULL) == -1) {
+            BOOST_LOG_TRIVIAL(error) << "reset signal(" << sig->signo << ")failed.";
+            return false;
+        } else {
+            BOOST_LOG_TRIVIAL(debug) << "reset signal(" << sig->signo << ")successful.";
+        }
+
+    }
+
+    return true;
+}
+
+void
+waitpid_handler(int signum)
+{
+    int        status;
+    pid_t      pid;
+    u_int      one;
+
+    one = 0;
+    for ( ;; ) {
+        pid = waitpid(-1, &status, WNOHANG);
+        if (pid == 0) {
+            return;
+        }
+        if (pid == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ECHILD && one) {
+                return;
+            }
+            if (errno == ECHILD) {
+                BOOST_LOG_TRIVIAL(info) << "waitpid() failed";
+                return;
+            }
+            BOOST_LOG_TRIVIAL(warning) << "waitpid() failed";
+            return;
+        }
+
+        one = 1;
+        if (WTERMSIG(status)) {
+            BOOST_LOG_TRIVIAL(warning) << "pid(" << pid 
+                                       << ") exited on signal=" << WTERMSIG(status)
+                                       << " status=" << WEXITSTATUS(status);
+        } else {
+            BOOST_LOG_TRIVIAL(info) << "pid(" << pid 
+                                    << ") exited with code=" << WEXITSTATUS(status);
+        }
+
+        vector<process_t>::iterator it;
+        for (it = children_process_group.begin(); it != children_process_group.end(); it++) {
+            if ((*it).pid == pid) {
+                break;
+            }
+        }
+
+        if (it == children_process_group.end()) { /*没有找到该pid*/
+            continue;
+        }
+
+        process_t old_process = (*it);
+
+        //从子进程组里面删除此子进程
+        children_process_group.erase(it);
+
+
+        BOOST_LOG_TRIVIAL(info) << "process(" << old_process.name << ") exit";
+
+        if (WEXITSTATUS(status) != 0) {           /*致命错误，跳过*/
+            BOOST_LOG_TRIVIAL(warning) << "pid(" << pid 
+                                       << ") exited with fatal code=" << WEXITSTATUS(status);
+            continue;
+        }
+
+        if (old_process.restart == 0) { /*无需重启*/
+            continue;
+        }
+
+        //正常退出，尝试重启
+        pid_t new_pid;
+        if ((new_pid = spawn_worker_process(old_process.name)) == -1) {
+            BOOST_LOG_TRIVIAL(warning) << "spawn worker process failed";
+            continue;
+        }
+        process_t new_process = old_process;
+        new_process.pid = new_pid;
+        children_process_group.push_back(new_process);
+        BOOST_LOG_TRIVIAL(info) << "process(" << new_process.name << ") spawn successful";
+    }
+}
+
+pid_t
+spawn_worker_process(const std::string name)
+{
+    pid_t   pid;
+
+    pid = fork();
+    switch (pid) {
+
+    case -1:
+        BOOST_LOG_TRIVIAL(warning) << "fork() failed";
+        return -1;
+    case 0:
+        init_worker_process(process_name_ptr, confd_config, name);
+        break;
+    default:
+        break;
+    }
+
+    return pid;
+}
+
 void
 graceful_shutdown_confd(int signum)
 {
     BOOST_LOG_TRIVIAL(debug) << "received signal(" << signum << "), shutdown all process.";
-    for (auto& children_pid: children_process_group) { //exit all children process
-        if (kill(children_pid, SIGKILL)) {
-            BOOST_LOG_TRIVIAL(warning) << "kill process failed: pid(" << children_pid << ")";
+    for (auto& children: children_process_group) { //exit all children process
+        children.restart = 0;                      //禁止重启子进程
+    }
+    std::vector<process_t> copyed(children_process_group); 
+    for (auto& children: copyed) { //exit all children process
+        BOOST_LOG_TRIVIAL(debug) << "send sigkill to pid(" << children.pid << ")";
+        if (kill(children.pid, SIGKILL)) {
+            BOOST_LOG_TRIVIAL(warning) << "send sigkill to pid(" << children.pid << ") failed";
         }
     } 
 
@@ -235,9 +364,15 @@ init_master_process(char* process_name_ptr, unordered_map<string,string> config)
 }
 
 void
-init_worker_process(char* process_name_ptr, unordered_map<string,string> config)
+init_worker_process(char* process_name_ptr, unordered_map<string,string> config, std::string name)
 {
     process_rename(process_name_ptr, WORKERNAME);
+
+    BOOST_LOG_TRIVIAL(error) << "start#########process(" << name << ") reset signals############start";
+    if (!reset_signals(signals)) {
+        BOOST_LOG_TRIVIAL(error) << "reset signal failed.";
+    }
+    BOOST_LOG_TRIVIAL(error) << "end##########process(" << name << ") reset signals############end";
 
     httpServer(config["addr"], stoll(config["port"])); 
     exit(0);

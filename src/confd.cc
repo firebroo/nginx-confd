@@ -5,13 +5,14 @@
 #include "confd_dict.h"
 #include "process_manage.h"
 #include "nginx_conf_parse.h"
-#include "../lib/jsoncpp/src/json/json.h"
+#include "json.h"
 
 namespace logging = boost::log;
 using namespace logging;
 
-std::vector<pid_t> children_process_group;
+std::vector<process_t> children_process_group;
 std::unordered_map<std::string, std::string> confd_config;
+char *process_name_ptr;
 
 void
 usage()
@@ -142,7 +143,7 @@ main(int argc, char *argv[])
     int i;
     const char *cmd = NULL;
     const char *config_file = NULL;
-    char *process_name_ptr = argv[0];
+    process_name_ptr = argv[0];
 
     while ((i = getopt(argc, argv, "hs:c:")) != -1) {
         switch(i){
@@ -192,18 +193,18 @@ main(int argc, char *argv[])
         exit(-1);
     }
 
-    
     //fork worker process
     for (int i = 0; i < stoll(confd_config["worker_process"]); i++) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            BOOST_LOG_TRIVIAL(error) << "master fork error: " << strerror(errno);
-        } else if (pid == 0) { 
-            init_worker_process(process_name_ptr, confd_config);
-        } else {
-            children_process_group.push_back(pid);
+        std::string name = std::string("worker") + std::to_string(i);
+        pid_t pid = spawn_worker_process(name);
+        if (pid == -1) {
+            BOOST_LOG_TRIVIAL(warning) << "spawn worker process failed";
+            continue;
         }
+        process_t new_process = {name, pid, 1};
+        children_process_group.push_back(new_process);
     }
+
 
     //master process will sleep util received signal
     while (true) {

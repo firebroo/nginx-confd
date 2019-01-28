@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <vector>
 #include <boost/filesystem.hpp>
+#include <boost/algorithm/string.hpp>
  
 namespace logging = boost::log;
 using namespace logging;
@@ -113,9 +114,8 @@ nginx_opt::gen_upstream(std::string listen_port, std::string key, std::vector<st
 }
 
 std::string
-nginx_opt::gen_server(std::string listen_port, std::string key, std::vector<std::string> value, std::string tmp_style)
+nginx_opt::gen_server(std::string listen_port, std::string server_name, std::vector<std::string> value, std::string tmp_style)
 {
-    char buf[10240];
     std::ifstream ifs; 
     const char *conf_extension = ".conf";
 
@@ -132,10 +132,38 @@ nginx_opt::gen_server(std::string listen_port, std::string key, std::vector<std:
     }
     std::ostringstream os;
     os << ifs.rdbuf();
+
+
     std::string nginx_conf_template = std::string(os.str());
-    std::string upstream_name = key+"_"+listen_port;
-    sprintf(buf, nginx_conf_template.c_str(), listen_port.c_str(), key.c_str(), upstream_name.c_str());
-    return std::string(buf);
+    return nginx_opt::template_replace(listen_port, server_name, nginx_conf_template);
+}
+
+std::string 
+nginx_opt::template_replace(const std::string& listen_port, const std::string& server_name, std::string nginx_conf_template)
+{
+    char buf[10240];
+
+    std::string upstream_name = server_name + "_" + listen_port;
+
+    std::unordered_map<std::string, std::string> replace_value{
+        {"%{listen_port}",   listen_port},
+        {"%{server_name}",   server_name},
+        {"%{upstream_name}", upstream_name}
+    };
+    for (auto& item: replace_value) {
+        while (true) {
+            std::string copyed = boost::replace_first_copy(nginx_conf_template, item.first, "%s"); 
+            if (copyed == nginx_conf_template) {
+                break;
+            }
+            memset(buf, '\0', 10240);
+            nginx_conf_template = copyed;
+            sprintf(buf, nginx_conf_template.c_str(), item.second.c_str());
+            nginx_conf_template = std::string(buf);
+        }
+    }
+
+    return nginx_conf_template;
 }
 
 std::pair<bool, std::string>

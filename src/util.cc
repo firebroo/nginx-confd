@@ -138,15 +138,21 @@ exec_cmd(const char* cmd)
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
-        return std::pair<bool, std::string>(false, strerror(errno));
+        return std::pair<bool, std::string>(false, std::string("popen(): ") + strerror(errno));
     }
     while (!feof(fp)) {
         if (fgets(buf, sizeof(buf), fp) != NULL) {
             stdout_buffer += std::string(buf);
         }
     }
+
+    /*调用pclose等待子进程退出，如果当前进程是另外进程的子进程，
+    退出信号会被超级父进程wait, 导致调用errno返回10
+    */
     if (pclose(fp) == -1) {
-        return std::pair<bool, std::string>(false, strerror(errno));
+        if (errno != 10) { //No child processes
+            return std::pair<bool, std::string>(false, std::string("pclose(): ") + strerror(errno));
+        }
     }
 
     return std::pair<bool, std::string>(true, stdout_buffer);

@@ -1,4 +1,5 @@
 CXX=g++
+INCLUDE = -I./lib/jsoncpp/src/json
 LDFLAGS= -Wl,-Bstatic -lboost_log -lboost_log_setup -lboost_filesystem -lboost_system -lboost_regex -lboost_thread -Wl,-Bdynamic -lpthread -O2
 CXXFLAGS= -O2 -Wall -std=c++11 -DUSE_BOOST_REGEX -DUSE_MMAP_ANON -DUSE_SYSV_SEM
 SRC=src
@@ -53,7 +54,7 @@ test:
 
 %.o: %.cc
 	@echo CXX $<
-	@$(CXX) $(CXXFLAGS) -c $^ -o $@
+	@$(CXX) $(INCLUDE) $(CXXFLAGS) -c $^ -o $@
 
 .PHONY: clean
 clean:

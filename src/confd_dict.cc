@@ -2,7 +2,7 @@
 #include "confd_dict.h"
 #include "confd_shm.h"
 #include "confd_shmtx.h"
-#include "../lib/jsoncpp/src/json/json.h"
+#include "json.h"
 
 extern confd_shm_t     *shm;
 extern confd_shmtx_t   *shmtx;
