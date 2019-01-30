@@ -89,41 +89,42 @@ class nginxConfParse {
                 regex proxy_pass_e("location\\s+/\\s+\\{.*?proxy_pass(.*?);.*?\\}", boost::regex::perl|boost::regex::mod_s);
 
                 std::string listen, server_name, proxy_pass;
-                if (boost::regex_search(server, listen_what, listen_e)) {
-                    listen = string(listen_what[1]);
-                    listen = trim(listen);
-                } else {
+                if (!boost::regex_search(server, listen_what, listen_e)) {           /*没有搜索到listen line*/
                     continue;
                 }
+                listen = string(listen_what[1]);
+                listen = trim(listen);
 
-                if (boost::regex_search(server, server_name_what, server_name_e)) {
-                    server_name = string(server_name_what[1]);
-                    server_name = trim(server_name);
-                } else {
+                if (!boost::regex_search(server, server_name_what, server_name_e)) { /*没有搜索到server_name line*/
                     continue;
                 }
+                server_name = string(server_name_what[1]);
+                server_name = trim(server_name);
 
-                if (boost::regex_search(server, proxy_pass_what, proxy_pass_e)) {
-                    proxy_pass = string(proxy_pass_what[1]);
-                    proxy_pass = this->remove_protocol(trim(proxy_pass));
-                    proxy_pass = this->variable_replace(proxy_pass, server); //proxy_pass maybe variable
+                if (!boost::regex_search(server, proxy_pass_what, proxy_pass_e)) {
+                    continue;
                 }
+                proxy_pass = string(proxy_pass_what[1]);
+                proxy_pass = this->remove_protocol(trim(proxy_pass));
+                proxy_pass = this->variable_replace(proxy_pass, server); //proxy_pass maybe variable
 
                 //multi value server_name
                 std::vector<std::string> strs;
                 boost::split(strs, server_name, boost::is_any_of(" "));
                 for (size_t i = 0; i < strs.size(); i++) {
-                    string ele = trim(strs[i]);
-                    if (!ele.empty()) {
-                        std::vector<std::string> listens;
-                        boost::split(listens, listen, boost::is_any_of(" "));
-                        for (size_t i = 0; i < listens.size(); i++) {
-                            string port = trim(listens[i]);
-                            if (!port.empty() && !is_nginx_listen_opt(port)) {
-                                string key = ele + "_" + port;
-                                servers[key] = proxy_pass; 
-                            }
+                    std::string ele = trim(strs[i]);
+                    if (ele.empty()) {                                       /*跳过空元素*/
+                        continue;
+                    }
+                    std::vector<std::string> listens;
+                    boost::split(listens, listen, boost::is_any_of(" "));
+                    for (size_t i = 0; i < listens.size(); i++) {
+                        string port = trim(listens[i]);
+                        if (port.empty() || is_nginx_listen_opt(port)) {    /*如果端口是一些特殊flag,比如http2,则跳过*/
+                            continue;
                         }
+                        string key = ele + "_" + port;
+                        servers[key] = proxy_pass; 
                     }
                 }
             }

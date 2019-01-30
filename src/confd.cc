@@ -12,7 +12,6 @@ using namespace logging;
 
 std::vector<process_t> children_process_group;
 std::unordered_map<std::string, std::string> confd_config;
-char *process_name_ptr;
 
 void
 usage()
@@ -143,7 +142,10 @@ main(int argc, char *argv[])
     int i;
     const char *cmd = NULL;
     const char *config_file = NULL;
-    process_name_ptr = argv[0];
+    confd_arg = {
+        .argc = argc,
+        .argv = argv
+    };
 
     while ((i = getopt(argc, argv, "hs:c:")) != -1) {
         switch(i){
@@ -189,7 +191,7 @@ main(int argc, char *argv[])
     }
 
     //初始化主进程
-    if (!init_master_process(process_name_ptr, confd_config)) {
+    if (!init_master_process(confd_config)) {
         exit(-1);
     }
 
@@ -201,7 +203,11 @@ main(int argc, char *argv[])
             BOOST_LOG_TRIVIAL(warning) << "spawn worker process failed";
             continue;
         }
-        process_t new_process = {name, pid, 1};
+        process_t new_process = {
+            .name = name,
+            .pid = pid,
+            .restart = 1 
+        };
         children_process_group.push_back(new_process);
     }
 

@@ -6,15 +6,16 @@
 #include "confd_dict.h"
 #include "nginx_conf_parse.h"
 
-static void reload_nginx_conf(int signum);
-static void waitpid_handler(int signum);
-static void graceful_shutdown_confd(int signum);
+static void reload_nginx_conf(int signo, siginfo_t *siginfo, void *ucontext);
+static void waitpid_handler(int signo, siginfo_t *siginfo, void *ucontext);
+static void graceful_shutdown_confd(int signo, siginfo_t *siginfo, void *ucontext);
 
-static std::pair<bool, std::string> load_nginx_conf(const std::string& nginx_bin_path, 
-        const std::string& nginx_conf_path);
+static bool load_nginx_conf(const std::string& nginx_bin_path, const std::string& nginx_conf_path);
 static bool register_signals(confd_signal_t *signals);
 static pid_t get_master_process_pid(const char* pid_path);
 static bool writen_pidfile(const char* pid_path);
+static  bool remove_pidfile(const char* pid_path);
+static char* process_rename(confd_arg_t confd_arg, const char* wanted_name);
 
 confd_shmtx_t* shmtx;
 confd_shm_t* shm;
@@ -22,7 +23,7 @@ confd_shmtx_t* updatetx;
 confd_shm_t* update;
 extern std::vector<process_t> children_process_group;
 extern std::unordered_map<std::string, std::string> confd_config;
-extern char *process_name_ptr;
+confd_arg_t confd_arg;
 
 static confd_signal_t signals[] = {
     {SIGHUP,  "reload",  reload_nginx_conf},
@@ -31,15 +32,39 @@ static confd_signal_t signals[] = {
     {0,       NULL,      NULL}                       //loop end flag
 };
 
+char*
+process_rename(confd_arg_t confd_arg, const char* wanted_name)
+{
+    /*数据内存分布情况: ./confd\0-c\0config.json*/
+    int len = 0;
+    char** argv = confd_arg.argv;
+    for(int i = 0; i < confd_arg.argc; i++) {
+        len += strlen(argv[i]) + 1;
+    }
+    char *p = argv[0];
+    memset(p, '\0', len);
+    
+    strcpy(p, wanted_name);
+    return p;
+}
+
 bool
 register_signals(confd_signal_t *signals)
 {
     confd_signal_t  *sig;
     struct sigaction sa;
-    sa.sa_flags = 0;
 
     for(sig = signals; sig->signo != 0; sig++) {
-        sa.sa_handler = sig->handler;
+        memset(&sa, '\0', sizeof(struct sigaction));
+
+        if (sig->handler) {
+            sa.sa_sigaction = sig->handler;
+            sa.sa_flags = SA_SIGINFO;
+        } else {
+            sa.sa_handler = SIG_IGN;
+        }
+
+        sigemptyset(&sa.sa_mask);
         if (sigaction(sig->signo, &sa, NULL) == -1) {
             BOOST_LOG_TRIVIAL(error) << "regesiter signal(" << sig->signo << ")failed.";
             return false;
@@ -60,7 +85,15 @@ reset_signals(confd_signal_t *signals)
     sa.sa_flags = 0;
 
     for(sig = signals; sig->signo != 0; sig++) {
-        sa.sa_handler = SIG_DFL;
+        memset(&sa, '\0', sizeof(struct sigaction));
+
+        if (sig->handler) {
+            sa.sa_handler = SIG_DFL; /*重置为默认处理方式*/
+        } else {
+            sa.sa_handler = SIG_IGN;
+        }
+
+        sigemptyset(&sa.sa_mask);
         if (sigaction(sig->signo, &sa, NULL) == -1) {
             BOOST_LOG_TRIVIAL(error) << "reset signal(" << sig->signo << ")failed.";
             return false;
@@ -74,12 +107,13 @@ reset_signals(confd_signal_t *signals)
 }
 
 void
-waitpid_handler(int signum)
+waitpid_handler(int signo, siginfo_t *siginfo, void *ucontext)
 {
     int        status;
     pid_t      pid;
     u_int      one;
 
+    BOOST_LOG_TRIVIAL(debug) << "waitpid_handler(): received signal(" << signo << ") from " << siginfo->si_pid;
     one = 0;
     for ( ;; ) {
         pid = waitpid(-1, &status, WNOHANG);
@@ -112,11 +146,9 @@ waitpid_handler(int signum)
         }
 
         vector<process_t>::iterator it;
-        for (it = children_process_group.begin(); it != children_process_group.end(); it++) {
-            if ((*it).pid == pid) {
-                break;
-            }
-        }
+        it = std::find_if(children_process_group.begin(), children_process_group.end(), [pid](process_t const& item) { 
+            return item.pid == pid;
+        });
 
         if (it == children_process_group.end()) { /*没有找到该pid*/
             continue;
@@ -165,7 +197,7 @@ spawn_worker_process(const std::string name)
         BOOST_LOG_TRIVIAL(warning) << "fork() failed";
         return -1;
     case 0:
-        init_worker_process(process_name_ptr, confd_config, name);
+        init_worker_process(confd_arg, confd_config, name);
         break;
     default:
         break;
@@ -175,9 +207,9 @@ spawn_worker_process(const std::string name)
 }
 
 void
-graceful_shutdown_confd(int signum)
+graceful_shutdown_confd(int signo, siginfo_t *siginfo, void *ucontext)
 {
-    BOOST_LOG_TRIVIAL(debug) << "received signal(" << signum << "), shutdown all process.";
+    BOOST_LOG_TRIVIAL(debug) << "graceful_shutdown_confd(): received signal(" << signo << ") from " << siginfo->si_pid;
     for (auto& children: children_process_group) { //exit all children process
         children.restart = 0;                      //禁止重启子进程
     }
@@ -214,6 +246,10 @@ graceful_shutdown_confd(int signum)
         BOOST_LOG_TRIVIAL(info) << "update shm destory successful.";
     }
 
+    if (remove_pidfile(confd_config["pid_path"].c_str())) {
+        BOOST_LOG_TRIVIAL(warning) << "remove pidfile failed: " << strerror(errno);
+    }
+
     BOOST_LOG_TRIVIAL(debug) << "shutdown all process finish.";
     exit(0);                                //退出主进程
 }
@@ -234,6 +270,12 @@ writen_pidfile(const char* pid_path)
     return true;
 }
 
+bool
+remove_pidfile(const char* pid_path)
+{
+    return unlink(pid_path);
+}
+
 pid_t
 get_master_process_pid(const char* pid_path)
 {
@@ -252,7 +294,6 @@ get_master_process_pid(const char* pid_path)
 void
 notify_master_process(const char *pid_path, const char *cmd)
 {
-
     pid_t pid = get_master_process_pid(pid_path);
     if (pid == -1) {
         printf("confd: open pid_file(%s) error: %s\n", pid_path, strerror(errno));
@@ -275,52 +316,63 @@ notify_master_process(const char *pid_path, const char *cmd)
     exit(0);
 }
 
-std::pair<bool, std::string>
+bool
 load_nginx_conf(const std::string& nginx_bin_path, const std::string& nginx_conf_path)
 {
     std::string status;
     nginxConfParse nginx_conf_parse;
-
-    std::pair<bool, std::string> ret = nginx_opt::nginx_conf_test(nginx_bin_path.c_str(), nginx_conf_path.c_str());
+   
+    auto ret = nginx_opt::nginx_conf_test(nginx_bin_path.c_str(), nginx_conf_path.c_str());
     if (!ret.first) {
-        return ret;
+        BOOST_LOG_TRIVIAL(error) << "reload nginx failed error: " << ret.second;
+        return false;
     }
-    std::unordered_map<std::string, vector<std::string>> dict = nginx_conf_parse.parse(nginx_conf_path.c_str()); 
-    confd_dict* confd_p = new confd_dict(dict);
-    std::string new_data = confd_p->json_stringify();
-    lock(shmtx);
-    if (strcmp(shm->addr, new_data.c_str())) {
-        strcpy(shm->addr, new_data.c_str());
-        status = "update";
-    } else {
-        status = "no update";
+    //std::unordered_map<std::string, vector<std::string>> dict = nginx_conf_parse.parse(nginx_conf_path.c_str()); 
+    auto dict = nginx_conf_parse.parse(nginx_conf_path.c_str()); 
+    if (dict.size() == 0) {
+        BOOST_LOG_TRIVIAL(debug) << "nginx_conf_parse result is 0";
+        return false;
     }
-    unlock(shmtx);
-    delete confd_p;
 
-    return std::pair<bool, std::string>(true, status);
+    std::unique_ptr<confd_dict> confd_p(new confd_dict(dict));
+
+    std::string new_data = confd_p->json_stringify();
+    if (new_data.empty()) {
+        BOOST_LOG_TRIVIAL(debug) << "new_data is empty";
+        return false;
+    }
+    lock(shmtx);
+    if (strcmp(shm->addr, new_data.c_str()) == 0) {
+        unlock(shmtx);
+        return false;
+    }
+
+    /*复制新解析数据到共享内存地址*/
+    strcpy(shm->addr, new_data.c_str());
+    unlock(shmtx);
+    return true;
 }
 
 void
-reload_nginx_conf(int signum)
+reload_nginx_conf(int signo, siginfo_t *siginfo, void *ucontext)
 {
-    std::pair<bool, std::string> ret = load_nginx_conf(confd_config["nginx_bin_path"], confd_config["nginx_conf_path"]);
-    if (!ret.first) {
-        BOOST_LOG_TRIVIAL(warning) << "reload nginx failed error: " << ret.second;
+    BOOST_LOG_TRIVIAL(debug) << "reload_nginx_conf(): received signal(" << signo << ") from " << siginfo->si_pid;
+
+    bool ret = load_nginx_conf(confd_config["nginx_bin_path"], confd_config["nginx_conf_path"]);
+    if (ret) {
+        confd_dict dict;
+        dict.update_status(true);
+        BOOST_LOG_TRIVIAL(info) << "reparse && reload nginx_conf successful, status: update";
     } else {
-        if (ret.second == "update") {
-            confd_dict dict;
-            dict.update_status(true);
-        }
-        BOOST_LOG_TRIVIAL(info) << "reparse && reload nginx_conf successful, status: " << ret.second;
+        BOOST_LOG_TRIVIAL(info) << "reparse && reload nginx_conf successful, status: no update";
     }
 }
 
 bool
-init_master_process(char* process_name_ptr, unordered_map<string,string> config)
+init_master_process(unordered_map<string,string> config)
 {
 
-    process_rename(process_name_ptr, MASTERNAME);
+    process_rename(confd_arg, MASTERNAME);
 
     if (!writen_pidfile(config["pid_path"].c_str())) {
         BOOST_LOG_TRIVIAL(warning) << "writed pidfile(" << config["pid_path"] << ") failed.";
@@ -349,9 +401,9 @@ init_master_process(char* process_name_ptr, unordered_map<string,string> config)
         return false;
     }
 
-    std::pair<bool, std::string> ret = load_nginx_conf(config["nginx_bin_path"], config["nginx_conf_path"]);
-    if (!ret.first) {
-        BOOST_LOG_TRIVIAL(error) << "load nginx conf error: " << ret.second;
+    bool ret = load_nginx_conf(config["nginx_bin_path"], config["nginx_conf_path"]);
+    if (!ret) {
+        BOOST_LOG_TRIVIAL(error) << "load nginx conf error.";
         return false;
     }
     
@@ -360,19 +412,20 @@ init_master_process(char* process_name_ptr, unordered_map<string,string> config)
         return false;
     }
 
+
     return true;
 }
 
 void
-init_worker_process(char* process_name_ptr, unordered_map<string,string> config, std::string name)
+init_worker_process(confd_arg_t confd_arg, unordered_map<string,string> config, std::string name)
 {
-    process_rename(process_name_ptr, WORKERNAME);
+    process_rename(confd_arg, WORKERNAME);
 
-    BOOST_LOG_TRIVIAL(error) << "start#########process(" << name << ") reset signals############start";
+    BOOST_LOG_TRIVIAL(debug) << "start#########process(" << name << ") reset signals############start";
     if (!reset_signals(signals)) {
         BOOST_LOG_TRIVIAL(error) << "reset signal failed.";
     }
-    BOOST_LOG_TRIVIAL(error) << "end##########process(" << name << ") reset signals############end";
+    BOOST_LOG_TRIVIAL(debug) << "end##########process(" << name << ") reset signals############end";
 
     httpServer(config["addr"], stoll(config["port"])); 
     exit(0);

@@ -36,13 +36,6 @@ trim(std::string &s)
     return s;
 }
 
-char*
-process_rename(char *p, const char* wanted_name)
-{
-    memset(p, '\0', strlen(wanted_name)+1);
-    strcpy(p, wanted_name);
-    return p;
-}
 
 std::string&
 replace_all(std::string& str, const std::string& old_value, const std::string& new_value)
@@ -146,11 +139,14 @@ exec_cmd(const char* cmd)
         }
     }
 
-    /*调用pclose等待子进程退出，如果当前进程是另外进程的子进程，
-    退出信号会被超级父进程wait, 导致调用errno返回10
+    /* while (waitpid(pid, &stat, 0) < 0)
+     *   if (errno != EINTR)
+     *       return(-1); 
+     * pclose 内部也会调用waitpid, master进程异步注册的SIGCHLD信号
+     * 事件可能会早于期pclose触发，导致这里的waitpid返回errno(SIGCHLD)
     */
     if (pclose(fp) == -1) {
-        if (errno != 10) { //No child processes
+        if (errno != ECHILD) { //No child processes
             return std::pair<bool, std::string>(false, std::string("pclose(): ") + strerror(errno));
         }
     }
