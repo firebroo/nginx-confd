@@ -60,35 +60,39 @@ int httpServer(std::string address, int port) {
     string content;
     Json::Value root;
     try {
-      ptree pt;
-      read_json(request->content, pt);
+        ptree pt;
+        read_json(request->content, pt);
 
-      string domain = pt.get<string>("domain");
-      string tmp_type = pt.get<string>("type");
-      string listen_port = pt.get<string>("listen");
-      HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
-      //bool force = pt.get<bool>("force", false);
-      ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
-      
-      std::vector<std::string> upstream_vcs;
-      BOOST_FOREACH(boost::property_tree::ptree::value_type &v, upstreams) {  
-          upstream_vcs.push_back(v.second.get<string>("server"));
-      } 
+        string domain = pt.get<string>("domain");
+        string tmp_type = pt.get<string>("type");
+        string listen_port = pt.get<string>("listen");
+        HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
+        //bool force = pt.get<bool>("force", false);
+        ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
+        
+        std::vector<std::string> upstream_vcs;
+        BOOST_FOREACH(boost::property_tree::ptree::value_type &v, upstreams) {  
+            upstream_vcs.push_back(v.second.get<string>("server"));
+        } 
 
-      confd_dict dict;
-      dict.shm_sync_to_dict();
-      std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, false, type);
-      
-      root["code"] = 200;
-      root["info"] = ret.second;
-      auto header = request->header.find("Host");
-      std::string url(header->second);
-      url += "/api/confs/" + domain + "_" + listen_port;
-      root["query_url"] = url;
+        confd_dict dict;
+        dict.shm_sync_to_dict();
+        std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, false, type);
+        
+        root["info"] = ret.second;
+        if (!ret.first) {
+            root["code"] = 403;
+        } else {
+            root["code"] = 200;
+            auto header = request->header.find("Host");
+            std::string url(header->second);
+            url += "/api/confs/" + domain + "_" + listen_port;
+            root["query_url"] = url;
+        }
     }
     catch(const exception &e) {
-      root["code"] = 403;
-      root["info"] = e.what();
+        root["code"] = 403;
+        root["info"] = e.what();
     }
     content = root.toStyledString();
     *response << "HTTP/1.1 200 OK\r\n"
@@ -100,34 +104,38 @@ int httpServer(std::string address, int port) {
     string content;
     Json::Value root;
     try {
-      ptree pt;
-      read_json(request->content, pt);
+        ptree pt;
+        read_json(request->content, pt);
 
-      string domain = pt.get<string>("domain");
-      string tmp_type = pt.get<string>("type");
-      string listen_port = pt.get<string>("listen");
-      HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
-      ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
-      
-      std::vector<std::string> upstream_vcs;
-      BOOST_FOREACH(boost::property_tree::ptree::value_type &v, upstreams) {  
-          upstream_vcs.push_back(v.second.get<string>("server"));
-      } 
+        string domain = pt.get<string>("domain");
+        string tmp_type = pt.get<string>("type");
+        string listen_port = pt.get<string>("listen");
+        HEALTH_CHECK type = int_to_health_check_type(pt.get<int>("health_check"));
+        ptree upstreams = pt.get_child("upstreams");  // get_child得到数组对象   
+        
+        std::vector<std::string> upstream_vcs;
+        BOOST_FOREACH(boost::property_tree::ptree::value_type &v, upstreams) {  
+            upstream_vcs.push_back(v.second.get<string>("server"));
+        } 
 
-      confd_dict dict;
-      dict.shm_sync_to_dict();
-      std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, true, type);
-      
-      root["code"] = 200;
-      root["info"] = ret.second;
-      auto header = request->header.find("Host");
-      std::string url(header->second);
-      url += "/api/confs/" + domain + "_" + listen_port;
-      root["query_url"] = url;
+        confd_dict dict;
+        dict.shm_sync_to_dict();
+        std::pair<bool, std::string> ret = dict.add_item(listen_port, domain, upstream_vcs, tmp_type, true, type);
+        
+        root["info"] = ret.second;
+        if (!ret.first) {
+            root["code"] = 403;
+        } else {
+            root["code"] = 200;
+            auto header = request->header.find("Host");
+            std::string url(header->second);
+            url += "/api/confs/" + domain + "_" + listen_port;
+            root["query_url"] = url;
+        }
     }
     catch(const exception &e) {
-      root["code"] = 403;
-      root["info"] = e.what();
+        root["code"] = 403;
+        root["info"] = e.what();
     }
     content = root.toStyledString();
     *response << "HTTP/1.1 200 OK\r\n"

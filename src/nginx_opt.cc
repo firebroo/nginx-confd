@@ -196,7 +196,10 @@ nginx_opt::sync_to_disk(std::string port, std::string key, std::vector<std::stri
     sprintf(filepath, "%s%s_%s.conf", nginx_conf_writen_path.c_str(), key.c_str(), port.c_str());
     ofs.open(filepath);
     if (!ofs) {
-        return std::pair<bool, std::string>(false, "");
+        std::stringstream ss;
+        ss << "Open file(" << filepath << ") failed.";
+        BOOST_LOG_TRIVIAL(error) << ss.str();
+        return std::pair<bool, std::string>(false, ss.str());
     }
     ofs << upstream << server;
     ofs.close();
